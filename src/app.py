@@ -1,7 +1,6 @@
 import os
-import json
 import re
-import random
+import time
 import requests
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -10,171 +9,161 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 SLACK_BOT_TOKEN = os.environ["SLACK_BOT_TOKEN"]
-SLACK_APP_TOKEN = os.environ["SLACK_APP_TOKEN"]     
+SLACK_APP_TOKEN = os.environ["SLACK_APP_TOKEN"]
 
 # Initialize Slack app
 app = App(token=SLACK_BOT_TOKEN)
 
-# AI endpoint
-AI_ENDPOINT = "https://ai.hackclub.com/chat/completions"
+AI_API_URL = "https://ai.hackclub.com/chat/completions"
 
-# In-memory session tracking
-sessions = {}
+# Track previous tips per user
+user_tip_history = {}
 
-def call_ai(message_history):
-    payload = {"messages": message_history}
+# Track usage stats
+status_data = {
+    "messages_scanned": 0,
+    "scams_detected": 0,
+    "commands_used": 0,
+    "users": set()
+}
+
+# Helper function to query the Hack Club AI API
+def query_ai_api(prompt):
     headers = {"Content-Type": "application/json"}
+    data = {
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    response = requests.post(AI_API_URL, headers=headers, json=data)
+    if response.status_code == 200:
+        try:
+            return response.json()["choices"][0]["message"]["content"]
+        except Exception:
+            return "Error: Unexpected response format from AI API."
+    return "Error: AI API did not respond successfully."
 
-    try:
-        response = requests.post(AI_ENDPOINT, headers=headers, data=json.dumps(payload))
-        response.raise_for_status()
-        result = response.json()
+# Utility function to show thinking message then update with response
+def show_and_update_response(respond, prompt_text, label, user_id=None):
+    loading_msg = respond(text="CyAI is thinking... 🤔")
+    result = query_ai_api(prompt_text)
+    if label == "Cybersecurity Tip" and user_id:
+        user_tip_history.setdefault(user_id, []).append(result)
+    respond(
+        replace_original=True,
+        blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"*{label}:*\n{result}"}}]
+    )
 
-        choices = result.get("choices")
-        if not choices or not isinstance(choices, list) or not choices[0].get("message"):
-            return "❌ The AI did not respond properly. Please try again."
-
-        content = choices[0]["message"].get("content", "").strip()
-        if not content:
-            return "❌ The AI returned an empty response. Try again in a moment."
-
-        return content
-
-    except Exception as e:
-        print("AI request failed:", e)
-        return "❌ Something went wrong while contacting the AI."
-
-
-def extract_choices(text):
-    return [line.strip() for line in text.split("\n") if re.match(r"^[A-Ea-e][\):]\s", line)]
-
-def build_blocks(text, choices, show_inventory_button=True):
-    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
-
-    if choices:
-        action_elements = []
-        for choice in choices:
-            label = choice[:2].strip()
-            action_id = f"choice_{label.lower().replace(')', '').replace(':', '')}"
-            action_elements.append({
-                "type": "button",
-                "text": {"type": "plain_text", "text": choice},
-                "value": label,
-                "action_id": action_id
-            })
-        if show_inventory_button:
-            action_elements.append({
-                "type": "button",
-                "text": {"type": "plain_text", "text": "📦 Show Inventory"},
-                "value": "show_inventory",
-                "action_id": "show_inventory"
-            })
-        blocks.append({"type": "actions", "elements": action_elements})
-    else:
-        blocks.append({"type": "context", "elements": [
-            {"type": "plain_text", "text": "🏁 The adventure has ended."}
-        ]})
-    return blocks
-
-@app.command("/startgame")
-def start_game(ack, respond, command):
+# Command: /scan-message
+@app.command("/scan-message")
+def handle_scan_message(ack, respond, command):
     ack()
+    status_data["commands_used"] += 1
+    status_data["users"].add(command["user_id"])
+    text = command.get("text")
+    prompt = f"Is this message a scam or phishing? Just return: Safe, Suspicious, or Likely Scam. Explain briefly: '{text}'"
+    show_and_update_response(respond, prompt, "Scan Result")
+
+# Command: /scan-email
+@app.command("/scan-email")
+def handle_scan_email(ack, respond, command):
+    ack()
+    status_data["commands_used"] += 1
+    status_data["users"].add(command["user_id"])
+    email = command.get("text")
+    prompt = f"Is the email '{email}' fake or legitimate? Respond with a short verdict and reason."
+    show_and_update_response(respond, prompt, "Email Check")
+
+# Command: /scan-url
+@app.command("/scan-url")
+def handle_scan_url(ack, respond, command):
+    ack()
+    status_data["commands_used"] += 1
+    status_data["users"].add(command["user_id"])
+    url = command.get("text")
+    prompt = f"Is this link safe or dangerous: '{url}'? Return a short answer and reason."
+    show_and_update_response(respond, prompt, "URL Check")
+
+# Command: /check-password
+@app.command("/check-password")
+def handle_check_password(ack, respond, command):
+    ack()
+    status_data["commands_used"] += 1
+    status_data["users"].add(command["user_id"])
+    password = command.get("text")
+    prompt = f"Is the password '{password}' strong or weak? Explain briefly and give one suggestion."
+    show_and_update_response(respond, prompt, "Password Strength")
+
+# Command: /scan-app
+@app.command("/scan-app")
+def handle_scan_app(ack, respond, command):
+    ack()
+    status_data["commands_used"] += 1
+    status_data["users"].add(command["user_id"])
+    app_name = command.get("text")
+    prompt = f"Is '{app_name}' a legit app or malware? Answer shortly with explanation."
+    show_and_update_response(respond, prompt, "App Legitimacy Check")
+
+# Command: /security-tip
+@app.command("/security-tip")
+def handle_security_tip(ack, respond, command):
+    ack()
+    status_data["commands_used"] += 1
     user_id = command["user_id"]
+    status_data["users"].add(user_id)
+    previous_tips = user_tip_history.get(user_id, [])
+    context_note = "Avoid repeating any of these tips: " + "; ".join(previous_tips) if previous_tips else ""
+    prompt = f"Give a short, actionable cybersecurity tip. {context_note}"
+    show_and_update_response(respond, prompt, "Cybersecurity Tip", user_id)
 
-    themes = [
-        "an ancient fog-shrouded island",
-        "a forgotten city buried under sand",
-        "an orbiting derelict station lost to time",
-        "a mirror-world forest where nothing is as it seems",
-        "a labyrinth beneath a ruined monastery"
-    ]
-    theme = random.choice(themes)
-
-    prompt = (
-        f"You are an AI game master. Create the *first scene* of a surreal and mysterious text adventure set in *{theme}*. "
-        "Make the setting eerie, rich, and unpredictable. "
-        "You may use 1 emoji if it suits the tone. End the story with 5 distinct choices labeled A) through E), each on its own line. "
-        "Avoid any explanation, summary, or hints. Only show the mysterious scene and choices."
-    )
-
-    history = [{"role": "user", "content": prompt}]
-    story = call_ai(history)
-    history.append({"role": "assistant", "content": story})
-
-    sessions[user_id] = {
-        "step": 1,
-        "history": history,
-        "inventory": ["*Lantern*", "*Tattered map*"]
-    }
-
-    choices = extract_choices(story)
-    if not choices:
-        respond(text="❌ Oops! The AI didn't return valid choices. Try again using `/startgame`.")
-        return
-
-    blocks = build_blocks(story, choices)
-    respond(blocks=blocks)
-
-@app.action(re.compile(r"^choice_[a-e]$"))
-def handle_choice(ack, body, respond):
+# Command: /recent-scams
+@app.command("/recent-scams")
+def handle_recent_scams(ack, respond, command):
     ack()
-    user_id = body["user"]["id"]
-    choice = body["actions"][0]["value"]
+    status_data["commands_used"] += 1
+    status_data["users"].add(command["user_id"])
+    prompt = "Briefly summarize one current trending phishing or scam method."
+    show_and_update_response(respond, prompt, "Recent Scam Trends")
 
-    session = sessions.get(user_id, {})
-    step = session.get("step", 1)
-    history = session.get("history", [])
-    inventory = session.get("inventory", [])
-
-    if step >= 10:
-        prompt = (
-            f"The player chose {choice}. This is the *final scene* (Step 10) of a mysterious text adventure. "
-            "Conclude the story with a satisfying or enigmatic ending."
-            "Do not include any more choices or actions. Limit emojis to one or none."
-        )
-    else:
-        prompt = (
-            f"The player chose {choice}. Continue the mysterious story with a rich, eerie new scene (Step {step+1}). "
-            "End with 5 new choices (A to E), each on a new line. "
-            "Avoid summaries or repetition. Use at most one emoji."
-        )
-
-    history.append({"role": "user", "content": prompt})
-    story = call_ai(history)
-    history.append({"role": "assistant", "content": story})
-
-    sessions[user_id] = {
-        "step": step + 1,
-        "history": history,
-        "inventory": inventory
-    }
-
-    choices = extract_choices(story)
-    if step >= 10 or not choices:
-        blocks = build_blocks(story, [], show_inventory_button=True)
-    else:
-        blocks = build_blocks(story, choices, show_inventory_button=True)
-
-    respond(blocks=blocks)
-
-@app.action("show_inventory")
-def show_inventory(ack, body, client):
+# Command: /cyai-status
+@app.command("/cyai-status")
+def handle_cyai_status(ack, respond):
     ack()
-    user_id = body["user"]["id"]
-    inventory = sessions.get(user_id, {}).get("inventory", [])
-
-    inventory_text = "*Your inventory contains:*\n" + "\n".join(f"• {item}" for item in inventory) \
-        if inventory else "*Your inventory is empty.*"
-
-    client.chat_postEphemeral(
-        channel=body["channel"]["id"],
-        user=user_id,
-        blocks=[{
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": inventory_text}
-        }],
-        text="Inventory"
+    message = (
+        f"*CyAI Status Report:*\n"
+        f"• Total scans: {status_data['commands_used']}\n"
+        f"• Messages scanned: {status_data['messages_scanned']}\n"
+        f"• Scams detected: {status_data['scams_detected']}\n"
+        f"• Unique users: {len(status_data['users'])}"
     )
+    respond(blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": message}}])
+
+# Passive listener: React to scammy messages with ❌
+@app.event("message")
+def handle_message_events(body, say, client):
+    event = body.get("event", {})
+    text = event.get("text", "")
+    channel = event.get("channel")
+    ts = event.get("ts")
+
+    if text and not event.get("bot_id"):  # Ignore bot messages
+        status_data["messages_scanned"] += 1
+        prompt = f"Is this message a scam or phishing? Respond only: Safe, Suspicious, Likely Scam, or VERY Likely Scam: '{text}'"
+        result = query_ai_api(prompt)
+        
+        if "VERY Likely Scam" in result:
+            status_data["scams_detected"] += 1
+            client.reactions_add(
+                name="x",
+                channel=channel,
+                timestamp=ts
+            )
+        elif "Likely Scam" in result:
+            status_data["scams_detected"] += 1
+            client.reactions_add(
+                name="grey_question",
+                channel=channel,
+                timestamp=ts
+            )
 
 if __name__ == "__main__":
-    SocketModeHandler(app, SLACK_APP_TOKEN).start()
+    handler = SocketModeHandler(app, SLACK_APP_TOKEN)
+    handler.start()
